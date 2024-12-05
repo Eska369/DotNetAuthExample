@@ -18,13 +18,15 @@ public class AuthController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly SignInManager<ApplicationUser> _signInManager;
     private readonly ApplicationDbContext _context;
+    private readonly RedisTokenStore _redis;
 
-    public AuthController(UserManager<ApplicationUser> userManager, IConfiguration configuration, SignInManager<ApplicationUser> signInManager, ApplicationDbContext context)
+    public AuthController(UserManager<ApplicationUser> userManager, IConfiguration configuration, SignInManager<ApplicationUser> signInManager, ApplicationDbContext context, RedisTokenStore redis)
     {
         _userManager = userManager;
         _configuration = configuration;
         _signInManager = signInManager;
         _context = context;
+        _redis = redis;
     }
 
     [HttpPost("register")]
@@ -47,6 +49,7 @@ public class AuthController : ControllerBase
             return Unauthorized("Invalid credentials.");
 
         var token = GenerateJwtToken(user);
+        await _redis.StoreTokenAsync(token.Token, token.Expiration);
         return Ok(token);
     }
 
@@ -68,7 +71,6 @@ public class AuthController : ControllerBase
         var signInResult = await _signInManager.ExternalLoginSignInAsync(info.LoginProvider, info.ProviderKey, false);
         if (!signInResult.Succeeded)
         {
-            // Jeśli użytkownik nie istnieje, zarejestruj go
             var email = info.Principal.FindFirstValue(ClaimTypes.Email);
             var user = new ApplicationUser { Email = email, UserName = email };
             var createResult = await _userManager.CreateAsync(user);
@@ -80,6 +82,7 @@ public class AuthController : ControllerBase
 
         var loggedInUser = await _userManager.FindByLoginAsync(info.LoginProvider, info.ProviderKey);
         var token = GenerateJwtToken(loggedInUser);
+        await _redis.StoreTokenAsync(token.Token, token.Expiration);
 
         return Ok(token);
     }
@@ -109,11 +112,15 @@ public class AuthController : ControllerBase
             signingCredentials: new SigningCredentials(authSigningKey, SecurityAlgorithms.HmacSha256)
         );
 
-        return Ok(new JwtResponse
+        var response = new JwtResponse
         {
             Token = new JwtSecurityTokenHandler().WriteToken(token),
             Expiration = token.ValidTo
-        });
+        };
+
+        await _redis.StoreTokenAsync(response.Token, response.Expiration);
+
+        return Ok(response);
     }
 
     private JwtResponse GenerateJwtToken(ApplicationUser user)
@@ -140,6 +147,19 @@ public class AuthController : ControllerBase
             Token = new JwtSecurityTokenHandler().WriteToken(token),
             Expiration = token.ValidTo
         };
+    }
+
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        var token = HttpContext.Request.Headers.Authorization.ToString().Replace("Bearer ", "");
+        if (string.IsNullOrEmpty(token))
+        {
+            return BadRequest("Token is missing.");
+        }
+
+        await _redis.RevokeTokenAsync(token);
+        return Ok("Token revoked.");
     }
 }
 
